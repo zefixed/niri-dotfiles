@@ -341,7 +341,7 @@ window-rule {
     match app-id=r#"Spotify$"#
     match app-id=r#"Nautilus$"#
     match app-id=r#"Obsidian$"#
-    opacity 0.9
+    opacity 0.95
     draw-border-with-background false
 }
 
@@ -371,9 +371,9 @@ window-rule {
 
 binds {
     Mod+Shift+S hotkey-overlay-title="Spotify" { spawn-sh "LD_PRELOAD=/usr/local/lib/spotify-adblock.so spotify"; }
-    Mod+Shift+T hotkey-overlay-title="Telegram" { spawn-sh "Telegram"; }
+    Mod+Shift+T hotkey-overlay-title="Telegram" { spawn-sh "telegram-desktop"; }
     Mod+Shift+Z hotkey-overlay-title="Firefox" { spawn-sh "firefox"; }
-    Mod+Shift+G hotkey-overlay-title="Goland" { spawn-sh "/opt/GoLand-2025.1/bin/goland"; }
+    Mod+Shift+G hotkey-overlay-title="Goland" { spawn-sh "goland"; }
     Mod+E hotkey-overlay-title="Nautilus" { spawn-sh "nautilus -w"; }
     Mod+Shift+O hotkey-overlay-title="Obsidian" { spawn-sh "obsidian"; }
     // Keys consist of modifiers separated by + signs, followed by an XKB key name
@@ -653,3 +653,5 @@ binds {
 }
 
 include "dms/cursor.kdl"
+
+include "dms/outputs.kdl"
