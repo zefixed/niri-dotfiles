@@ -118,10 +118,10 @@ source $ZSH/oh-my-zsh.sh
 export PATH="$PATH:$(go env GOPATH)/bin"
 
 
-[[ -s "~/.gvm/scripts/gvm" ]] && source "~/.gvm/scripts/gvm"
+[[ -s "$HOME/.gvm/scripts/gvm" ]] && source "$HOME/.gvm/scripts/gvm"
 
 # Created by `pipx`
-export PATH="$PATH:~/.local/bin"
+export PATH="$PATH:$HOME/.local/bin"
 
 # Aliases
 alias sudo='sudo '
