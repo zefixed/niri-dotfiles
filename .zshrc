@@ -126,4 +126,5 @@ export PATH="$PATH:$HOME/.local/bin"
 # Aliases
 alias sudo='sudo '
 alias n='nvim'
-alias cat='batcat --theme="TwoDark"'
+alias cat='bat --theme="TwoDark"'
+alias c='\cat'
