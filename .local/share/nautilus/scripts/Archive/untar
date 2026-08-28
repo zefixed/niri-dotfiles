@@ -1,0 +1,81 @@
+#!/bin/bash
+
+if [ -z "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" ]; then
+    notify-send -u critical "Untar" "Не выбран ни один TAR-архив"
+    exit 1
+fi
+
+url_decode() {
+    local encoded="$1"
+    printf '%b' "${encoded//%/\\x}"
+}
+
+DEST_ROOT=""
+if [[ "$NAUTILUS_SCRIPT_CURRENT_URI" == file://* ]]; then
+    DEST_ROOT=$(url_decode "${NAUTILUS_SCRIPT_CURRENT_URI#file://}")
+    if [ ! -d "$DEST_ROOT" ]; then
+        DEST_ROOT=""
+    fi
+fi
+
+HAS_ANY=0
+
+while IFS= read -r TARGET; do
+    [ -z "$TARGET" ] && continue
+
+    NAME=$(basename "$TARGET")
+    LOW="${NAME,,}"
+
+    if [[ "$LOW" == *.tar.gz ]]; then
+        STEM="${NAME%.tar.gz}"
+        TAR_FLAGS=(xzf)
+    elif [[ "$LOW" == *.tgz ]]; then
+        STEM="${NAME%.tgz}"
+        TAR_FLAGS=(xzf)
+    elif [[ "$LOW" == *.tar ]]; then
+        STEM="${NAME%.tar}"
+        TAR_FLAGS=(xf)
+    else
+        notify-send -u critical "Untar: $NAME" "Не TAR-архив - пропущено"
+        continue
+    fi
+
+    if [ ! -f "$TARGET" ]; then
+        notify-send -u critical "Untar: $NAME" "Файл не найден - пропущено"
+        continue
+    fi
+
+    if [ -z "$DEST_ROOT" ]; then
+        DEST_ROOT=$(dirname "$TARGET")
+    fi
+
+    SUFFIX=""
+    N=1
+    while [ -e "$DEST_ROOT/$STEM$SUFFIX" ]; do
+        SUFFIX=" ($N)"
+        N=$((N+1))
+    done
+
+    DEST_TARGET="$DEST_ROOT/$STEM$SUFFIX"
+    mkdir -p "$DEST_TARGET" || {
+        notify-send -u critical "Untar: $NAME" "Не удалось создать директорию $STEM$SUFFIX"
+        continue
+    }
+
+    OUTPUT=$(tar "${TAR_FLAGS[@]}" "$TARGET" -C "$DEST_TARGET" 2>&1)
+    STATUS=$?
+    HAS_ANY=1
+
+    if [ $STATUS -ne 0 ]; then
+        notify-send -u critical -i dialog-error "Untar: $NAME - ошибка" "$OUTPUT"
+        continue
+    fi
+
+    notify-send -i package-x-generic "Untar: $NAME" "Извлечено в: $STEM$SUFFIX"
+
+done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
+
+if [ "$HAS_ANY" -eq 0 ]; then
+    notify-send -u critical "Untar" "Не выбран ни один TAR-архив"
+    exit 1
+fi

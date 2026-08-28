@@ -1,0 +1,100 @@
+#!/bin/bash
+
+if [ -z "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" ]; then
+    notify-send -u critical "Archive" "Не выбрано ни одного элемента"
+    exit 1
+fi
+
+url_decode() {
+    local encoded="$1"
+    printf '%b' "${encoded//%/\\x}"
+}
+
+TARGETS=()
+while IFS= read -r TARGET; do
+    [ -z "$TARGET" ] && continue
+    if [ ! -f "$TARGET" ] && [ ! -d "$TARGET" ]; then
+        notify-send -u critical "Archive: $(basename "$TARGET")" "Элемента не существует - пропущено"
+        continue
+    fi
+    TARGETS+=("$TARGET")
+done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+    notify-send -u critical "Archive" "Нет элементов для архивирования"
+    exit 1
+fi
+
+DEST_DIR=""
+if [[ "$NAUTILUS_SCRIPT_CURRENT_URI" == file://* ]]; then
+    DEST_DIR=$(url_decode "${NAUTILUS_SCRIPT_CURRENT_URI#file://}")
+    if [ ! -d "$DEST_DIR" ]; then
+        DEST_DIR=""
+    fi
+fi
+
+if [ -z "$DEST_DIR" ]; then
+    DEST_DIR=$(dirname "${TARGETS[0]}")
+fi
+
+BASE_NAMES=()
+for target in "${TARGETS[@]}"; do
+    BASE_NAMES+=("$(basename "$target")")
+done
+
+IFS=$'\n' SORTED=($(LC_ALL=C sort <<< "${BASE_NAMES[*]}"))
+IFS=$' \t\n'
+
+COUNT=${#TARGETS[@]}
+if [ "$COUNT" -eq 1 ]; then
+    ARCHIVE_NAME="${SORTED[0]}.zip"
+else
+    ARCHIVE_NAME="${SORTED[0]}_and_$((COUNT-1))_more.zip"
+fi
+
+ARCHIVE_PATH="$DEST_DIR/$ARCHIVE_NAME"
+
+if [ -e "$ARCHIVE_PATH" ]; then
+    notify-send -u critical "Archive" "Файл $ARCHIVE_NAME уже существует"
+    exit 1
+fi
+
+COMMON_PARENT=$(dirname "${TARGETS[0]}")
+ALL_SAME=1
+for target in "${TARGETS[@]:1}"; do
+    if [ "$(dirname "$target")" != "$COMMON_PARENT" ]; then
+        ALL_SAME=0
+        break
+    fi
+done
+
+STAGE=""
+if [ "$ALL_SAME" -eq 1 ]; then
+    OUTPUT=$(cd "$COMMON_PARENT" && zip -qr "$ARCHIVE_PATH" "${BASE_NAMES[@]}" -x "$ARCHIVE_NAME" 2>&1)
+    STATUS=$?
+else
+    STAGE=$(mktemp -d) || { notify-send -u critical "Archive" "Не удалось создать временную директорию"; exit 1; }
+    trap 'rm -rf "$STAGE"' EXIT
+    for target in "${TARGETS[@]}"; do
+        base=$(basename "$target")
+        while [ -e "$STAGE/$base" ]; do
+            base="${base}_~"
+        done
+        ln -s "$target" "$STAGE/$base"
+    done
+    OUTPUT=$(cd "$STAGE" && zip -qr "$ARCHIVE_PATH" . 2>&1)
+    STATUS=$?
+fi
+
+if [ $STATUS -ne 0 ]; then
+    notify-send -u critical -i dialog-error "Archive - ошибка" "$OUTPUT"
+    exit 1
+fi
+
+LIST=""
+for name in "${SORTED[@]}"; do
+    LIST+="
+$name"
+done
+
+notify-send -i package-x-generic "Archive" "$ARCHIVE_NAME: ${#TARGETS[@]} элементов:$LIST"

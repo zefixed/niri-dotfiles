@@ -1,0 +1,81 @@
+#!/bin/bash
+
+if [ -z "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" ]; then
+    notify-send -u critical "Archive" "Не выбрано ни одного элемента"
+    exit 1
+fi
+
+url_decode() {
+    local encoded="$1"
+    printf '%b' "${encoded//%/\\x}"
+}
+
+TARGETS=()
+while IFS= read -r TARGET; do
+    [ -z "$TARGET" ] && continue
+    if [ ! -f "$TARGET" ] && [ ! -d "$TARGET" ]; then
+        notify-send -u critical "Archive: $(basename "$TARGET")" "Элемента не существует - пропущено"
+        continue
+    fi
+    TARGETS+=("$TARGET")
+done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
+
+if [ ${#TARGETS[@]} -eq 0 ]; then
+    notify-send -u critical "Archive" "Нет элементов для архивирования"
+    exit 1
+fi
+
+DEST_DIR=""
+if [[ "$NAUTILUS_SCRIPT_CURRENT_URI" == file://* ]]; then
+    DEST_DIR=$(url_decode "${NAUTILUS_SCRIPT_CURRENT_URI#file://}")
+    if [ ! -d "$DEST_DIR" ]; then
+        DEST_DIR=""
+    fi
+fi
+
+if [ -z "$DEST_DIR" ]; then
+    DEST_DIR=$(dirname "${TARGETS[0]}")
+fi
+
+BASE_NAMES=()
+for target in "${TARGETS[@]}"; do
+    BASE_NAMES+=("$(basename "$target")")
+done
+
+IFS=$'\n' SORTED=($(LC_ALL=C sort <<< "${BASE_NAMES[*]}"))
+IFS=$' \t\n'
+
+COUNT=${#TARGETS[@]}
+if [ "$COUNT" -eq 1 ]; then
+    ARCHIVE_NAME="${SORTED[0]}.tgz"
+else
+    ARCHIVE_NAME="${SORTED[0]}_and_$((COUNT-1))_more.tgz"
+fi
+
+ARCHIVE_PATH="$DEST_DIR/$ARCHIVE_NAME"
+
+if [ -e "$ARCHIVE_PATH" ]; then
+    notify-send -u critical "Archive" "Файл $ARCHIVE_NAME уже существует"
+    exit 1
+fi
+
+TAR_ARGS=()
+for target in "${TARGETS[@]}"; do
+    TAR_ARGS+=(-C "$(dirname "$target")" "$(basename "$target")")
+done
+
+OUTPUT=$(tar czf "$ARCHIVE_PATH" --exclude="$ARCHIVE_NAME" "${TAR_ARGS[@]}" 2>&1)
+STATUS=$?
+
+if [ $STATUS -ne 0 ]; then
+    notify-send -u critical -i dialog-error "Archive - ошибка" "$OUTPUT"
+    exit 1
+fi
+
+LIST=""
+for name in "${SORTED[@]}"; do
+    LIST+="
+$name"
+done
+
+notify-send -i package-x-generic "Archive" "$ARCHIVE_NAME: ${#TARGETS[@]} элементов:$LIST"

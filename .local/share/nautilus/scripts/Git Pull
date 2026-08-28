@@ -1,0 +1,39 @@
+#!/bin/bash
+
+if [ -z "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" ]; then
+    notify-send -u critical "Git Pull" "Не выбрано ни одной директории"
+    exit 1
+fi
+
+while IFS= read -r TARGET_DIR; do
+    [ -z "$TARGET_DIR" ] && continue
+
+    DIR_NAME=$(basename "$TARGET_DIR")
+
+    if [ ! -d "$TARGET_DIR" ]; then
+        notify-send -u critical "Git Pull: $DIR_NAME" "Это не директория"
+        continue
+    fi
+
+    cd "$TARGET_DIR" || {
+        notify-send -u critical "Git Pull: $DIR_NAME" "Не удалось перейти в диреткорию"
+        continue
+    }
+
+    OUTPUT=$(git pull 2>&1)
+    STATUS=$?
+
+    if [ $STATUS -ne 0 ]; then
+        notify-send -u critical -i dialog-error "Git Pull: $DIR_NAME - ошибка" "$OUTPUT"
+        continue
+    fi
+
+    if echo "$OUTPUT" | grep -q "Already up to date"; then
+        notify-send -i emblem-default "Git Pull: $DIR_NAME" "Уже актуально"
+    else
+        LAST_COMMIT_MSG=$(git log -1 --pretty=%s)
+        LAST_COMMIT_HASH=$(git log -1 --pretty=%h)
+        notify-send -i emblem-default "Git Pull: $DIR_NAME - успешно" "[$LAST_COMMIT_HASH] $LAST_COMMIT_MSG"
+    fi
+
+done <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS"
