@@ -171,9 +171,26 @@ for DB in $DATABASES; do
   echo "CREATE DATABASE IF NOT EXISTS \`$DB\`;" >> "$SCHEMA_FILE"
   echo "" >> "$SCHEMA_FILE"
 
+  # Сначала дампим сами словари (CREATE DICTIONARY), ДО таблиц-обёрток:
+  # таблица с ENGINE = Dictionary(uuid) не может быть создана, пока
+  # словарь с этим uuid/именем не существует.
+  DICTIONARIES=$(ch_client --query "
+    SELECT name FROM system.dictionaries
+    WHERE database = '$DB'
+    ORDER BY name
+  ")
+
+  for DICT in $DICTIONARIES; do
+    echo "  -> словарь: $DICT"
+    echo "-- Dictionary: $DICT" >> "$SCHEMA_FILE"
+    ch_client --query "SHOW CREATE DICTIONARY \`$DB\`.\`$DICT\`" --format TabSeparatedRaw >> "$SCHEMA_FILE"
+    echo ";" >> "$SCHEMA_FILE"
+    echo "" >> "$SCHEMA_FILE"
+  done
+
   TABLES=$(ch_client --query "
     SELECT name FROM system.tables
-    WHERE database = '$DB' AND engine NOT LIKE '%View%'
+    WHERE database = '$DB' AND engine NOT LIKE '%View%' AND engine != 'Dictionary'
     ORDER BY name
   ")
 
