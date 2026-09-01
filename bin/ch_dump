@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+#
+# ch_dump.sh — полный дамп схемы и данных ClickHouse (schema + data)
+#
+# Делает:
+#   - DDL всех таблиц через SHOW CREATE TABLE  -> dump/<db>/schema.sql
+#   - Данные каждой таблицы в формате Native   -> dump/<db>/tables/<table>.native
+#
+# Формат Native сохраняет типы данных без потерь и восстанавливается
+# обратно в ClickHouse без проблем с Array/Nested/AggregateFunction и т.п.
+#
+# Работает с ClickHouse в docker-контейнере ИЛИ с сервером, установленным
+# прямо в системе (локально или по сети) — выбирается флагом -m.
+#
+# Использование:
+#   # ClickHouse в docker-контейнере (по умолчанию)
+#   ./ch_dump.sh -d mydb
+#   ./ch_dump.sh -d mydb -c clickhouse-server -o ./dump
+#
+#   # ClickHouse установлен в системе (бинарник clickhouse-client в PATH)
+#   ./ch_dump.sh -m local -d mydb
+#   ./ch_dump.sh -m local -d mydb -H 127.0.0.1 -P 9000 -u default -p mypass
+#
+#   # ClickHouse на удалённом хосте (тоже режим local, просто указывается -H)
+#   ./ch_dump.sh -m local -d mydb -H ch.example.com -P 9440 --secure
+#
+set -euo pipefail
+
+# ---------- Параметры по умолчанию ----------
+MODE="docker"          # docker | local
+CONTAINER="clickhouse-server"
+CLIENT_BIN="clickhouse-client"
+CH_HOST="127.0.0.1"
+CH_PORT="9000"
+DATABASE=""
+OUTPUT_DIR="./dump"
+CH_USER="default"
+CH_PASSWORD=""
+ALL_DATABASES=false
+SECURE=false
+
+usage() {
+  cat <<EOF
+Использование: $0 -d <database> [опции]
+
+Режим работы:
+  -m <mode>         docker | local  (по умолчанию: docker)
+                       docker — подключение через 'docker exec' к контейнеру
+                       local  — подключение напрямую через clickhouse-client
+                                (для базы, установленной в системе, или удалённого хоста)
+
+Опции:
+  -d <database>     Имя базы данных для дампа (обязательно, если не указан -A)
+  -A                Дампить все пользовательские базы (кроме system/information_schema)
+  -o <dir>          Директория для дампа (по умолчанию: ./dump)
+  -u <user>         Пользователь ClickHouse (по умолчанию: default)
+  -p <password>     Пароль ClickHouse (по умолчанию: пустой)
+  -h                Показать эту справку
+
+Опции для режима docker:
+  -c <container>    Имя docker-контейнера (по умолчанию: clickhouse-server)
+
+Опции для режима local:
+  -H <host>         Хост ClickHouse (по умолчанию: 127.0.0.1)
+  -P <port>         Порт TCP-протокола (по умолчанию: 9000)
+  -b <path>         Путь к бинарнику clickhouse-client (по умолчанию: clickhouse-client из PATH)
+  --secure          Использовать защищённое соединение (TLS, порт обычно 9440)
+
+Примеры:
+  $0 -d mydb
+  $0 -A -o /backups/ch_\$(date +%F)
+  $0 -m local -d mydb -H 127.0.0.1 -u default -p mypass
+  $0 -m local -A -H ch.example.com -P 9440 --secure -u admin -p secret
+EOF
+  exit 1
+}
+
+# Разбираем длинные опции (--secure) отдельно, остальное — через getopts
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --secure) SECURE=true; shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]}"
+
+while getopts "m:d:Ac:o:u:p:H:P:b:h" opt; do
+  case "$opt" in
+    m) MODE="$OPTARG" ;;
+    d) DATABASE="$OPTARG" ;;
+    A) ALL_DATABASES=true ;;
+    c) CONTAINER="$OPTARG" ;;
+    o) OUTPUT_DIR="$OPTARG" ;;
+    u) CH_USER="$OPTARG" ;;
+    p) CH_PASSWORD="$OPTARG" ;;
+    H) CH_HOST="$OPTARG" ;;
+    P) CH_PORT="$OPTARG" ;;
+    b) CLIENT_BIN="$OPTARG" ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+
+if [[ -z "$DATABASE" && "$ALL_DATABASES" == false ]]; then
+  echo "Ошибка: нужно указать -d <database> или -A" >&2
+  usage
+fi
+
+if [[ "$MODE" != "docker" && "$MODE" != "local" ]]; then
+  echo "Ошибка: -m должен быть 'docker' или 'local'" >&2
+  usage
+fi
+
+# ---------- Обёртка над clickhouse-client ----------
+# Общие флаги авторизации/соединения, собираются один раз
+COMMON_FLAGS=(--user "$CH_USER")
+[[ -n "$CH_PASSWORD" ]] && COMMON_FLAGS+=(--password "$CH_PASSWORD")
+
+if [[ "$MODE" == "local" ]]; then
+  COMMON_FLAGS+=(--host "$CH_HOST" --port "$CH_PORT")
+  [[ "$SECURE" == true ]] && COMMON_FLAGS+=(--secure)
+fi
+
+ch_client() {
+  if [[ "$MODE" == "docker" ]]; then
+    docker exec -i "$CONTAINER" clickhouse-client "${COMMON_FLAGS[@]}" "$@"
+  else
+    "$CLIENT_BIN" "${COMMON_FLAGS[@]}" "$@"
+  fi
+}
+
+# ---------- Проверка доступности сервера ----------
+if [[ "$MODE" == "docker" ]]; then
+  if ! docker exec "$CONTAINER" clickhouse-client "${COMMON_FLAGS[@]}" --query "SELECT 1" >/dev/null 2>&1; then
+    echo "Ошибка: не удаётся подключиться к ClickHouse в контейнере '$CONTAINER'" >&2
+    exit 1
+  fi
+else
+  if ! command -v "$CLIENT_BIN" >/dev/null 2>&1; then
+    echo "Ошибка: бинарник '$CLIENT_BIN' не найден в PATH. Укажите путь через -b" >&2
+    exit 1
+  fi
+  if ! "$CLIENT_BIN" "${COMMON_FLAGS[@]}" --query "SELECT 1" >/dev/null 2>&1; then
+    echo "Ошибка: не удаётся подключиться к ClickHouse на $CH_HOST:$CH_PORT" >&2
+    exit 1
+  fi
+fi
+
+# ---------- Список баз для дампа ----------
+if [[ "$ALL_DATABASES" == true ]]; then
+  DATABASES=$(ch_client --query "
+    SELECT name FROM system.databases
+    WHERE name NOT IN ('system','information_schema','INFORMATION_SCHEMA')
+  ")
+else
+  DATABASES="$DATABASE"
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+for DB in $DATABASES; do
+  echo "=== База: $DB ==="
+  DB_DIR="$OUTPUT_DIR/$DB"
+  TABLES_DIR="$DB_DIR/tables"
+  mkdir -p "$TABLES_DIR"
+
+  SCHEMA_FILE="$DB_DIR/schema.sql"
+  : > "$SCHEMA_FILE"
+
+  echo "CREATE DATABASE IF NOT EXISTS \`$DB\`;" >> "$SCHEMA_FILE"
+  echo "" >> "$SCHEMA_FILE"
+
+  TABLES=$(ch_client --query "
+    SELECT name FROM system.tables
+    WHERE database = '$DB' AND engine NOT LIKE '%View%'
+    ORDER BY name
+  ")
+
+  if [[ -z "$TABLES" ]]; then
+    echo "  (таблиц не найдено)"
+    continue
+  fi
+
+  for TABLE in $TABLES; do
+    echo "  -> схема: $TABLE"
+    echo "-- Table: $TABLE" >> "$SCHEMA_FILE"
+    ch_client --query "SHOW CREATE TABLE \`$DB\`.\`$TABLE\`" --format TabSeparatedRaw >> "$SCHEMA_FILE"
+    echo ";" >> "$SCHEMA_FILE"
+    echo "" >> "$SCHEMA_FILE"
+
+    ROW_COUNT=$(ch_client --query "SELECT count() FROM \`$DB\`.\`$TABLE\`")
+    echo "  -> данные: $TABLE ($ROW_COUNT строк)"
+
+    if [[ "$ROW_COUNT" -gt 0 ]]; then
+      ch_client --query "SELECT * FROM \`$DB\`.\`$TABLE\` FORMAT Native" > "$TABLES_DIR/${TABLE}.native"
+    else
+      echo "     (пусто, файл не создаётся)"
+    fi
+  done
+
+  # Отдельно дампим VIEW/MATERIALIZED VIEW (у них нет данных, только DDL)
+  VIEWS=$(ch_client --query "
+    SELECT name FROM system.tables
+    WHERE database = '$DB' AND engine LIKE '%View%'
+    ORDER BY name
+  ")
+
+  for VIEW in $VIEWS; do
+    echo "  -> вьюха: $VIEW"
+    echo "-- View: $VIEW" >> "$SCHEMA_FILE"
+    ch_client --query "SHOW CREATE TABLE \`$DB\`.\`$VIEW\`" --format TabSeparatedRaw >> "$SCHEMA_FILE"
+    echo ";" >> "$SCHEMA_FILE"
+    echo "" >> "$SCHEMA_FILE"
+  done
+
+  echo "Готово: $DB_DIR"
+  echo ""
+done
+
+echo "=== Дамп завершён. Результат в: $OUTPUT_DIR ==="

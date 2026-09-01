@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+# ch_restore.sh — восстановление дампа, созданного ch_dump.sh
+#
+# Ожидает структуру:
+#   <dump_dir>/<db>/schema.sql
+#   <dump_dir>/<db>/tables/<table>.native
+#
+# Работает с ClickHouse в docker-контейнере ИЛИ с сервером, установленным
+# прямо в системе (локально или по сети) — выбирается флагом -m.
+#
+# Использование:
+#   # ClickHouse в docker-контейнере (по умолчанию)
+#   ./ch_restore.sh -i ./dump/mydb
+#   ./ch_restore.sh -i ./dump -A -c clickhouse-server
+#
+#   # ClickHouse установлен в системе
+#   ./ch_restore.sh -m local -i ./dump/mydb
+#   ./ch_restore.sh -m local -i ./dump/mydb -H 127.0.0.1 -P 9000 -u default -p mypass
+#
+set -euo pipefail
+
+# ---------- Параметры по умолчанию ----------
+MODE="docker"          # docker | local
+CONTAINER="clickhouse-server"
+CLIENT_BIN="clickhouse-client"
+CH_HOST="127.0.0.1"
+CH_PORT="9000"
+INPUT_DIR=""
+CH_USER="default"
+CH_PASSWORD=""
+ALL_DATABASES=false
+SECURE=false
+
+usage() {
+  cat <<EOF
+Использование: $0 -i <dump_dir> [опции]
+
+Режим работы:
+  -m <mode>         docker | local  (по умолчанию: docker)
+                       docker — подключение через 'docker exec' к контейнеру
+                       local  — подключение напрямую через clickhouse-client
+                                (для базы, установленной в системе, или удалённого хоста)
+
+Опции:
+  -i <dump_dir>     Путь к дампу одной базы (директория со schema.sql и tables/)
+                     либо к родительской директории всех баз (с флагом -A)
+  -A                Считать, что -i указывает на директорию с несколькими базами (dump/<db1>, dump/<db2>, ...)
+  -u <user>         Пользователь ClickHouse (по умолчанию: default)
+  -p <password>     Пароль ClickHouse (по умолчанию: пустой)
+  -h                Показать эту справку
+
+Опции для режима docker:
+  -c <container>    Имя docker-контейнера (по умолчанию: clickhouse-server)
+
+Опции для режима local:
+  -H <host>         Хост ClickHouse (по умолчанию: 127.0.0.1)
+  -P <port>         Порт TCP-протокола (по умолчанию: 9000)
+  -b <path>         Путь к бинарнику clickhouse-client (по умолчанию: clickhouse-client из PATH)
+  --secure          Использовать защищённое соединение (TLS, порт обычно 9440)
+
+Примеры:
+  $0 -i ./dump/mydb
+  $0 -i ./dump -A
+  $0 -m local -i ./dump/mydb -H 127.0.0.1 -u default -p mypass
+EOF
+  exit 1
+}
+
+# Разбираем длинные опции (--secure) отдельно, остальное — через getopts
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --secure) SECURE=true; shift ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]}"
+
+while getopts "m:i:Ac:u:p:H:P:b:h" opt; do
+  case "$opt" in
+    m) MODE="$OPTARG" ;;
+    i) INPUT_DIR="$OPTARG" ;;
+    A) ALL_DATABASES=true ;;
+    c) CONTAINER="$OPTARG" ;;
+    u) CH_USER="$OPTARG" ;;
+    p) CH_PASSWORD="$OPTARG" ;;
+    H) CH_HOST="$OPTARG" ;;
+    P) CH_PORT="$OPTARG" ;;
+    b) CLIENT_BIN="$OPTARG" ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+
+if [[ -z "$INPUT_DIR" ]]; then
+  echo "Ошибка: нужно указать -i <dump_dir>" >&2
+  usage
+fi
+
+if [[ "$MODE" != "docker" && "$MODE" != "local" ]]; then
+  echo "Ошибка: -m должен быть 'docker' или 'local'" >&2
+  usage
+fi
+
+# ---------- Обёртка над clickhouse-client ----------
+COMMON_FLAGS=(--user "$CH_USER")
+[[ -n "$CH_PASSWORD" ]] && COMMON_FLAGS+=(--password "$CH_PASSWORD")
+
+if [[ "$MODE" == "local" ]]; then
+  COMMON_FLAGS+=(--host "$CH_HOST" --port "$CH_PORT")
+  [[ "$SECURE" == true ]] && COMMON_FLAGS+=(--secure)
+fi
+
+ch_client() {
+  if [[ "$MODE" == "docker" ]]; then
+    docker exec -i "$CONTAINER" clickhouse-client "${COMMON_FLAGS[@]}" "$@"
+  else
+    "$CLIENT_BIN" "${COMMON_FLAGS[@]}" "$@"
+  fi
+}
+
+# ---------- Проверка доступности сервера ----------
+if [[ "$MODE" == "docker" ]]; then
+  if ! docker exec "$CONTAINER" clickhouse-client "${COMMON_FLAGS[@]}" --query "SELECT 1" >/dev/null 2>&1; then
+    echo "Ошибка: не удаётся подключиться к ClickHouse в контейнере '$CONTAINER'" >&2
+    exit 1
+  fi
+else
+  if ! command -v "$CLIENT_BIN" >/dev/null 2>&1; then
+    echo "Ошибка: бинарник '$CLIENT_BIN' не найден в PATH. Укажите путь через -b" >&2
+    exit 1
+  fi
+  if ! "$CLIENT_BIN" "${COMMON_FLAGS[@]}" --query "SELECT 1" >/dev/null 2>&1; then
+    echo "Ошибка: не удаётся подключиться к ClickHouse на $CH_HOST:$CH_PORT" >&2
+    exit 1
+  fi
+fi
+
+restore_one_db() {
+  local DB_DIR="$1"
+  local DB
+  DB=$(basename "$DB_DIR")
+  local SCHEMA_FILE="$DB_DIR/schema.sql"
+  local TABLES_DIR="$DB_DIR/tables"
+
+  if [[ ! -f "$SCHEMA_FILE" ]]; then
+    echo "Пропуск '$DB_DIR': schema.sql не найден" >&2
+    return
+  fi
+
+  echo "=== Восстановление базы: $DB ==="
+  echo "-> применяю schema.sql"
+  ch_client --multiquery < "$SCHEMA_FILE"
+
+  if [[ -d "$TABLES_DIR" ]]; then
+    for FILE in "$TABLES_DIR"/*.native; do
+      [[ -e "$FILE" ]] || continue
+      local TABLE
+      TABLE=$(basename "$FILE" .native)
+      echo "-> загружаю данные: $TABLE"
+      ch_client --query "INSERT INTO \`$DB\`.\`$TABLE\` FORMAT Native" < "$FILE"
+    done
+  fi
+
+  echo "Готово: $DB"
+  echo ""
+}
+
+if [[ "$ALL_DATABASES" == true ]]; then
+  for DB_DIR in "$INPUT_DIR"/*/; do
+    [[ -d "$DB_DIR" ]] || continue
+    restore_one_db "${DB_DIR%/}"
+  done
+else
+  restore_one_db "${INPUT_DIR%/}"
+fi
+
+echo "=== Восстановление завершено ==="
